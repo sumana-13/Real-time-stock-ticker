@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Real-Time Stock Ticker</title>
+
+  <style>
+    :root {
+      --bg: #0f1724;
+      --card: #0b1220;
+      --muted: #94a3b8;
+      --accent: #10b981;
+    }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, Segoe UI, Roboto, "Helvetica Neue", Arial;
+    }
+
+    body {
+      background: linear-gradient(180deg, #071028 0%, #041026 100%);
+      color: #e6eef8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .app {
+      width: 980px;
+      max-width: 100%;
+      background: linear-gradient(180deg, rgba(255,255,255,0.02), transparent);
+      border-radius: 12px;
+      padding: 18px;
+      box-shadow: 0 10px 30px rgba(2,6,23,0.6);
+    }
+
+    h1 {
+      margin: 0 0 12px 0;
+      font-size: 20px;
+    }
+
+    .controls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    input[type=text] {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.06);
+      padding: 8px 10px;
+      border-radius: 8px;
+      color: inherit;
+      outline: none;
+    }
+
+    button {
+      background: var(--accent);
+      border: none;
+      padding: 8px 12px;
+      border-radius: 8px;
+      color: #04241a;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    button.ghost {
+      background: transparent;
+      border: 1px solid rgba(255,255,255,0.06);
+      color: var(--muted);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th, td {
+      padding: 10px;
+      text-align: left;
+      border-bottom: 1px dashed rgba(255,255,255,0.03);
+    }
+
+    th {
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    td.symbol {
+      font-weight: 700;
+      font-size: 16px;
+    }
+
+    td.price {
+      font-family: monospace;
+    }
+
+    .up {
+      color: #10b981;
+    }
+
+    .down {
+      color: #ef4444;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .small {
+      font-size: 12px;
+    }
+
+    .right {
+      text-align: right;
+    }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pill {
+      background: rgba(255,255,255,0.03);
+      padding: 6px 10px;
+      border-radius: 999px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+    <h1>Real-Time Stock Ticker</h1>
+    <div class="controls">
+      <input id="symbolInput" type="text" placeholder="Add symbol e.g. AAPL, TSLA" />
+      <button id="addBtn">Add</button>
+      <button id="demoBtn" class="ghost">Toggle Demo Mode</button>
+      <div style="margin-left:auto" class="muted small">
+        WebSocket: <span id="wsStatus">disconnected</span>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Price</th>
+          <th>Change</th>
+          <th class="right">%</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <div class="footer">
+      <div class="muted">Powered by Finnhub (or Demo Mode)</div>
+      <div class="pill">Replace <code>YOUR_API_KEY</code> inside this file</div>
+    </div>
+  </div>
+
+  <script>
+    // ---------- CONFIG ----------
+    const FINNHUB_API_KEY = 'YOUR_API_KEY';
+    const WS_URL = `wss://ws.finnhub.io?token=${FINNHUB_API_KEY}`;
+
+    // ---------- STATE ----------
+    const state = {
+      tickers: {},
+      ws: null,
+      demo: false,
+      reconnectDelay: 1000,
+      subscribed: new Set()
+    };
+
+    // ---------- DOM ----------
+    const rows = document.getElementById('rows');
+    const symbolInput = document.getElementById('symbolInput');
+    const addBtn = document.getElementById('addBtn');
+    const demoBtn = document.getElementById('demoBtn');
+    const wsStatus = document.getElementById('wsStatus');
+
+    // ---------- Events ----------
+    addBtn.onclick = () => {
+      const raw = symbolInput.value.trim().toUpperCase();
+      if (!raw) return;
+      raw.split(/[ ,]+/).forEach(s => addSymbol(s));
+      symbolInput.value = '';
+    };
+
+    demoBtn.onclick = () => {
+      state.demo = !state.demo;
+      demoBtn.textContent = state.demo ? 'Demo Mode: ON' : 'Toggle Demo Mode';
+      if (state.demo) {
+        closeWs();
+        startDemo();
+      } else {
+        stopDemo();
+        connectWs();
+      }
+    };
+
+    // ---------- UI ----------
+    function renderRows() {
+      rows.innerHTML = '';
+      Object.keys(state.tickers).forEach(sym => {
+        const t = state.tickers[sym];
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td class="symbol">${sym}<div class="muted small">${t.time || ''}</div></td>
+          <td class="price">${formatNumber(t.price)}</td>
+          <td class="${t.change >= 0 ? 'up' : 'down'}">${t.change >= 0 ? '+' : ''}${formatNumber(t.change)}</td>
+          <td class="right ${t.pct >= 0 ? 'up' : 'down'}">${t.pct >= 0 ? '+' : ''}${formatNumber(t.pct)}%</td>
+          <td class="right"><button class="ghost" data-sym="${sym}">Remove</button></td>
+        `;
+        rows.appendChild(tr);
+      });
+      Array.from(document.querySelectorAll('button.ghost[data-sym]')).forEach(
+        b => (b.onclick = () => removeSymbol(b.dataset.sym))
+      );
+    }
+
+    function formatNumber(n) {
+      if (n == null || isNaN(n)) return '—';
+      return (Math.round(n * 100) / 100).toLocaleString();
+    }
+
+    // ---------- Symbols ----------
+    function addSymbol(sym) {
+      if (state.tickers[sym]) return;
+      state.tickers[sym] = { price: null, prev: null, change: 0, pct: 0, time: null };
+      renderRows();
+      subscribeSymbol(sym);
+    }
+
+    function removeSymbol(sym) {
+      delete state.tickers[sym];
+      unsubscribeSymbol(sym);
+      renderRows();
+    }
+
+    // ---------- WebSocket ----------
+    function connectWs() {
+      if (state.demo) return;
+      if (!FINNHUB_API_KEY || FINNHUB_API_KEY === 'YOUR_API_KEY') {
+        wsStatus.textContent = 'no-api-key';
+        return;
+      }
+      state.ws = new WebSocket(WS_URL);
+      wsStatus.textContent = 'connecting...';
+      state.ws.onopen = () => {
+        wsStatus.textContent = 'connected';
+        state.subscribed.forEach(sym =>
+          state.ws.send(JSON.stringify({ type: 'subscribe', symbol: sym }))
+        );
+      };
+      state.ws.onmessage = evt => {
+        const d = JSON.parse(evt.data);
+        if (d.type === 'trade' && d.data) {
+          d.data.forEach(update => handleQuote(update.symbol, update.price, update.t));
+        }
+      };
+      state.ws.onclose = () => {
+        wsStatus.textContent = 'disconnected';
+        setTimeout(connectWs, state.reconnectDelay);
+      };
+    }
+
+    function closeWs() {
+      if (state.ws) {
+        state.ws.close();
+        state.ws = null;
+        wsStatus.textContent = 'closed';
+      }
+    }
+
+    function subscribeSymbol(sym) {
+      state.subscribed.add(sym);
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ type: 'subscribe', symbol: sym }));
+      }
+      if (!state.demo) seedPrice(sym);
+    }
+
+    function unsubscribeSymbol(sym) {
+      state.subscribed.delete(sym);
+      if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+        state.ws.send(JSON.stringify({ type: 'unsubscribe', symbol: sym }));
+      }
+    }
+
+    // ---------- REST Seed ----------
+    async function seedPrice(sym) {
+      try {
+        const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(sym)}&token=${FINNHUB_API_KEY}`;
+        const res = await fetch(url);
+        const j = await res.json();
+        if (j.c) handleQuote(sym, j.c, Date.now());
+      } catch (e) {}
+    }
+
+    // ---------- Quote Handling ----------
+    function handleQuote(sym, price, timestamp) {
+      if (!state.tickers[sym]) return;
+      const t = state.tickers[sym];
+      t.prev = t.price || price;
+      t.price = price;
+      t.change = t.price - (t.prev || t.price);
+      t.pct = t.prev ? ((t.price - t.prev) / t.prev) * 100 : 0;
+      t.time = new Date(timestamp || Date.now()).toLocaleTimeString();
+      renderRows();
+    }
+
+    // ---------- Demo Mode ----------
+    let demoInterval = null;
+    function startDemo() {
+      ['AAPL', 'TSLA', 'GOOGL', 'MSFT'].forEach(s => {
+        if (!state.tickers[s])
+          state.tickers[s] = { price: randBetween(100, 800), prev: null, change: 0, pct: 0, time: null };
+      });
+      renderRows();
+      demoInterval = setInterval(() => {
+        Object.keys(state.tickers).forEach(sym => {
+          const t = state.tickers[sym];
+          const move = (Math.random() - 0.5) * 3;
+          const newPrice = Math.max(0.01, (t.price || randBetween(50, 350)) + move);
+          handleQuote(sym, newPrice, Date.now());
+        });
+      }, 1100);
+    }
+
+    function stopDemo() {
+      if (demoInterval) clearInterval(demoInterval);
+      demoInterval = null;
+    }
+
+    function randBetween(a, b) {
+      return Math.random() * (b - a) + a;
+    }
+
+    // ---------- Init ----------
+    addSymbol('AAPL');
+    addSymbol('TSLA');
+    connectWs();
+  </script>
+</body>
+</html>
